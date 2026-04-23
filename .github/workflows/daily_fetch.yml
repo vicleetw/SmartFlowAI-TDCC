@@ -1,0 +1,33 @@
+name: Auto TDCC Sync
+
+on:
+  schedule:
+    # 台灣時間每週五晚上 10 點 (UTC 14:00)
+    - cron: '0 14 * * 5'
+  workflow_dispatch: # 讓你可以點按鈕手動跑
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Fetch Script
+        run: python fetch_tdcc.py
+
+      - name: Commit and Push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/*.csv
+          git commit -m "Update TDCC Data: $(date +'%Y-%m-%d')" || exit 0
+          git push
