@@ -26,7 +26,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 TAIPEI = timezone(timedelta(hours=8))
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 優先用 GitHub Actions 提供的 GITHUB_WORKSPACE（保證是實際 checkout 出來的 repo 根目錄）；
+# 本地測試時（沒有這個環境變數）才退回用 __file__ 反推。
+# 之前純用 __file__ 反推在 Actions 環境裡少算一層路徑，導致寫出的 CSV 落在 git 倉庫外面，
+# git add 找不到、執行機器結束後資料就直接消失——workflow 顯示成功但其實什麼都沒存到。
+ROOT = os.environ.get("GITHUB_WORKSPACE") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 
 # 每次執行最多補幾天（idempotent 補漏，缺口大的話會分好幾次 Action 執行慢慢補完）
@@ -371,6 +375,8 @@ def sync_market(market: str, fetch_fn):
 
 
 def main():
+    print(f"ROOT={ROOT}")
+    print(f"DATA_DIR={DATA_DIR} (exists={os.path.isdir(DATA_DIR)})")
     sync_market("twse", fetch_twse)
     sync_market("otc", fetch_otc)
 
