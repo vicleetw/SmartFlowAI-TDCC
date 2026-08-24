@@ -1,0 +1,37 @@
+name: Sync Institutional Data
+
+on:
+  schedule:
+    # 收盤後多排幾個時間點當備援：schedule 觸發本身不保證準時，甚至可能被跳過。
+    # 腳本是冪等補漏設計，所以哪一次真正跑成功、跑幾次都沒關係。
+    - cron: "0 7 * * 1-5"    # 15:00 台北
+    - cron: "30 7 * * 1-5"   # 15:30 台北
+    - cron: "0 8 * * 1-5"    # 16:00 台北
+    - cron: "0 9 * * 1-5"    # 17:00 台北
+  workflow_dispatch: {}       # 手動觸發（排程一直沒成功時自己按一下）
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run sync script
+        run: python scripts/sync_institutional.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "No new data, nothing to commit."
+          else
+            git commit -m "chore: sync institutional data $(date -u +%Y-%m-%d)"
+            git push
+          fi
