@@ -32,6 +32,7 @@ TAIPEI = timezone(timedelta(hours=8))
 # git add 找不到、執行機器結束後資料就直接消失——workflow 顯示成功但其實什麼都沒存到。
 ROOT = os.environ.get("GITHUB_WORKSPACE") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
+HOLIDAYS_FILE = os.path.join(DATA_DIR, "holidays.json")
 
 # 每次執行最多補幾天（idempotent 補漏，缺口大的話會分好幾次 Action 執行慢慢補完）
 MAX_FETCH_PER_RUN = 15
@@ -112,6 +113,69 @@ def existing_dates(market: str) -> set:
     if not os.path.isdir(d):
         return set()
     return {f[:8] for f in os.listdir(d) if re.match(r"^\d{8}\.csv$", f)}
+
+
+def today_str() -> str:
+    return datetime.now(TAIPEI).strftime("%Y%m%d")
+
+
+def load_holidays() -> dict:
+    if not os.path.isfile(HOLIDAYS_FILE):
+        return {"twse": [], "otc": []}
+    try:
+        with open(HOLIDAYS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {"twse": list(data.get("twse", [])), "otc": list(data.get("otc", []))}
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  ⚠️ 讀取 holidays.json 失敗，當作沒有快取: {e}")
+        return {"twse": [], "otc": []}
+
+
+def save_holidays(holidays: dict):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(HOLIDAYS_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            {"twse": sorted(set(holidays.get("twse", []))), "otc": sorted(set(holidays.get("otc", [])))},
+            f, indent=2, ensure_ascii=False,
+        )
+        f.write("\n")
+
+
+def fetch_official_holidays() -> set:
+    """
+    TWSE 官方休市日曆 API，一次回傳當年度全部休市日，比逐日詢問發現快很多。
+    比照 App 端 HolidaySyncer.swift 的邏輯：Date 是民國年 "1150101"（3碼民國年+MM+DD），
+    Name 含「交易日」字樣的要排除（那是標記「這天其實有開盤」的例外，不是休市日，
+    例如「國曆新年開始交易日」是開紅盤日、「農曆春節後開始交易日」是收假後第一個交易日）。
+    只涵蓋當年度，不含前一年的部分；跨年的缺口靠既有的逐日詢問+快取機制自然補上，不是問題。
+    網路失敗就回傳空集合，不影響其餘流程（純粹是加速用，不是必要依賴）。
+    """
+    url = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule"
+    try:
+        raw = http_get(url)
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+        print(f"  ⚠️ 抓官方休市日曆失敗（不影響其餘流程，會退回逐日詢問）: {e}")
+        return set()
+
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError:
+        print("  ⚠️ 官方休市日曆回應不是合法 JSON（不影響其餘流程）")
+        return set()
+
+    holidays = set()
+    for e in entries:
+        name = e.get("Name", "")
+        date_roc = e.get("Date", "")
+        if "交易日" in name or len(date_roc) != 7:
+            continue
+        try:
+            year = int(date_roc[:3]) + 1911
+            greg = f"{year}{date_roc[3:5]}{date_roc[5:7]}"
+        except ValueError:
+            continue
+        holidays.add(greg)
+    return holidays
 
 
 def write_csv(market: str, date: str, rows: list):
@@ -351,17 +415,19 @@ def fetch_otc(date: str):
 
 # ────────────────────────────── 主流程 ──────────────────────────────
 
-def sync_market(market: str, fetch_fn):
+def sync_market(market: str, fetch_fn, holidays: dict):
     print(f"=== {market.upper()} ===")
     existing = existing_dates(market)
+    known_holidays = set(holidays.get(market, []))
     candidates = trading_days_back(MAX_CANDIDATE_DAYS)
-    missing = [d for d in candidates if d not in existing][:MAX_FETCH_PER_RUN]
+    missing = [d for d in candidates if d not in existing and d not in known_holidays][:MAX_FETCH_PER_RUN]
 
     if not missing:
         print("  nothing to do")
         return
 
-    print(f"  {len(missing)} dates to fetch: {missing[-1]} .. {missing[0]}")
+    print(f"  {len(missing)} dates to fetch: {missing[-1]} .. {missing[0]} "
+          f"(已知假日 {len(known_holidays)} 天略過)")
     consecutive_empty = 0
     for date in missing:
         if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
@@ -375,8 +441,14 @@ def sync_market(market: str, fetch_fn):
                 consecutive_empty = 0
             elif got_response:
                 # 官方明確回覆「非交易日」：不算被擋，但也沒東西可寫，不重置斷路器計數
-                # （避免連續好幾天真的都是假日時，被誤判成堆積空結果）
-                pass
+                # （避免連續好幾天真的都是假日時，被誤判成堆積空結果）。
+                # 只有「確定是過去的日期」才記入假日快取——避免今天資料還沒公布時
+                # 被誤判成假日、之後資料出來了也不會再去抓（比照 App 端 isPastDate 的保護）。
+                if date < today_str():
+                    holidays.setdefault(market, []).append(date)
+                    print(f"  {date} 官方確認非交易日，記入假日快取，之後不再重複詢問")
+                else:
+                    print(f"  {date} 官方回應無資料（可能資料還沒公布），暫不記入假日快取")
             else:
                 consecutive_empty += 1
         except Exception as e:
@@ -390,12 +462,24 @@ def sync_market(market: str, fetch_fn):
 def main():
     print(f"ROOT={ROOT}")
     print(f"DATA_DIR={DATA_DIR} (exists={os.path.isdir(DATA_DIR)})")
+    holidays = load_holidays()
+    print(f"假日快取（本地累積）: twse={len(holidays.get('twse', []))} otc={len(holidays.get('otc', []))}")
+
+    # 先打官方休市日曆一次補齊當年度整批已知假日（TWSE/OTC 共用同一份行事曆），
+    # 之後逐日詢問時就會直接跳過這些日期，不用再一天一天發現。
+    official = fetch_official_holidays()
+    if official:
+        print(f"官方休市日曆: {len(official)} 天，併入假日快取")
+        holidays.setdefault("twse", []).extend(official)
+        holidays.setdefault("otc", []).extend(official)
+
     # 兩個市場互相獨立跑，其中一個意外整個掛掉也不該連累另一個完全沒機會執行。
     for market, fetch_fn in [("twse", fetch_twse), ("otc", fetch_otc)]:
         try:
-            sync_market(market, fetch_fn)
+            sync_market(market, fetch_fn, holidays)
         except Exception as e:
             print(f"  ⚠️ {market} 執行中發生未預期錯誤，略過改跑下一個市場: {e}")
+    save_holidays(holidays)
 
 
 if __name__ == "__main__":
