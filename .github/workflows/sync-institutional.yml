@@ -10,6 +10,13 @@ on:
     - cron: "0 9 * * 1-5"    # 17:00 台北
   workflow_dispatch: {}       # 手動觸發（排程一直沒成功時自己按一下）
 
+# 同一時間只讓一個這個 workflow 的執行在跑，後面觸發的排隊等前一個結束，不要並行。
+# 沒有這個的話，兩次執行重疊時（例如手動觸發跟排程剛好撞在一起）會各自 commit+push，
+# 後完成的那個因為遠端已經被前一個推進，會被 git 拒絕（fetch first）。
+concurrency:
+  group: sync-institutional
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -32,7 +39,21 @@ jobs:
           git add data/
           if git diff --staged --quiet; then
             echo "No new data, nothing to commit."
-          else
-            git commit -m "chore: sync institutional data $(date -u +%Y-%m-%d)"
-            git push
+            exit 0
           fi
+          git commit -m "chore: sync institutional data $(date -u +%Y-%m-%d)"
+
+          # 保險用：就算 concurrency 卡住了同一個 workflow 重疊執行，
+          # 這個 repo 還有另一個獨立的 TDCC workflow 也會 push，還是可能撞在一起。
+          # push 被拒絕（遠端有新 commit）就 pull --rebase 追上去再試一次，最多試 5 次。
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "push succeeded on attempt $i"
+              exit 0
+            fi
+            echo "push rejected (attempt $i), pulling remote changes and retrying..."
+            git pull --rebase
+            sleep 3
+          done
+          echo "push failed after 5 attempts"
+          exit 1
