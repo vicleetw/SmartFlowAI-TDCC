@@ -116,6 +116,13 @@ def existing_dates(market: str) -> set:
 
 def write_csv(market: str, date: str, rows: list):
     d = os.path.join(DATA_DIR, market)
+    if os.path.exists(d) and not os.path.isdir(d):
+        # data/twse 或 data/otc 這個路徑被誤建成檔案（例如 GitHub 網頁「新增檔案」打錯，
+        # 打了資料夾名稱但沒加子路徑，變成建出一個同名檔案）而不是資料夾，
+        # os.makedirs(exist_ok=True) 對「已存在但不是資料夾」的情況還是會噴錯。
+        # 這裡自動清掉那個誤建的檔案，避免整個腳本因此崩潰、後面所有資料都白跑。
+        print(f"  ⚠️ {d} 是檔案不是資料夾，可能是手動誤建，自動移除後改建資料夾")
+        os.remove(d)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, f"{date}.csv")
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -361,24 +368,34 @@ def sync_market(market: str, fetch_fn):
             print(f"  連續{consecutive_empty}次空資料，疑似被擋，本次執行提前結束（剩餘留到下次）")
             break
         print(f"  fetching {date} ...")
-        rows, got_response = fetch_fn(date)
-        if rows:
-            write_csv(market, date, rows)
-            consecutive_empty = 0
-        elif got_response:
-            # 官方明確回覆「非交易日」：不算被擋，但也沒東西可寫，不重置斷路器計數
-            # （避免連續好幾天真的都是假日時，被誤判成堆積空結果）
-            pass
-        else:
-            consecutive_empty += 1
+        try:
+            rows, got_response = fetch_fn(date)
+            if rows:
+                write_csv(market, date, rows)
+                consecutive_empty = 0
+            elif got_response:
+                # 官方明確回覆「非交易日」：不算被擋，但也沒東西可寫，不重置斷路器計數
+                # （避免連續好幾天真的都是假日時，被誤判成堆積空結果）
+                pass
+            else:
+                consecutive_empty += 1
+        except Exception as e:
+            # 單一天出意外（解析錯誤、未預期的資料格式...）不該讓整次執行直接崩潰、
+            # 賠上這一天之前已經成功寫好的資料（也賠上另一個市場完全沒機會執行）。
+            # 印出來方便事後從 log 查，但繼續跑下一天。
+            print(f"  ⚠️ {date} 發生未預期錯誤，跳過繼續下一天: {e}")
         time.sleep(REQUEST_DELAY)
 
 
 def main():
     print(f"ROOT={ROOT}")
     print(f"DATA_DIR={DATA_DIR} (exists={os.path.isdir(DATA_DIR)})")
-    sync_market("twse", fetch_twse)
-    sync_market("otc", fetch_otc)
+    # 兩個市場互相獨立跑，其中一個意外整個掛掉也不該連累另一個完全沒機會執行。
+    for market, fetch_fn in [("twse", fetch_twse), ("otc", fetch_otc)]:
+        try:
+            sync_market(market, fetch_fn)
+        except Exception as e:
+            print(f"  ⚠️ {market} 執行中發生未預期錯誤，略過改跑下一個市場: {e}")
 
 
 if __name__ == "__main__":
