@@ -25,6 +25,7 @@ jobs:
         run: python sync_institutional.py
 
       - name: Commit and push if changed
+        if: always()   # 就算上面那步意外失敗，已經抓到的部分也要存下來，不要整批賠掉
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
