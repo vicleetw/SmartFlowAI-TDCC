@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Run sync script
-        run: python scripts/sync_institutional.py
+        run: python sync_institutional.py
 
       - name: Commit and push if changed
         run: |
