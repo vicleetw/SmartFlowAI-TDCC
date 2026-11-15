@@ -24,6 +24,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Network diagnostics (non-fatal)
+        continue-on-error: true
+        run: |
+          getent ahosts smart.tdcc.com.tw || true
+          U="https://smart.tdcc.com.tw/opendata/getOD.ashx?id=1-5"
+          curl -4 -sS -m 40 -o /dev/null -w "ipv4 http=%{http_code} ip=%{remote_ip} t=%{time_total}\n" "$U" || true
+          curl -6 -sS -m 40 -o /dev/null -w "ipv6 http=%{http_code} ip=%{remote_ip} t=%{time_total}\n" "$U" || true
+
       - name: Run Fetch Script
         run: python fetch_tdcc.py
 
